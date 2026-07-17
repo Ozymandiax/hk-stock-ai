@@ -33,7 +33,7 @@ jobs:
         git config --global user.name "Stock AI Bot"
         
         # 複製並更新 Hugging Face Space (記得將下面的用戶名與 Space 名稱替換為你的實際名稱)
-        git clone https://oauth:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/【你的HF用戶名】/【你的Space名稱】 hf_space
+        git clone https://oauth:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/Ozymand1az/hk-stock-ai hf_space
         
         cp index.html hf_space/index.html
         cd hf_space
