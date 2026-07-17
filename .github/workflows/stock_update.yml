@@ -1,0 +1,42 @@
+name: Daily Stock AI Update
+
+on:
+  schedule:
+    - cron: '30 9 * * 1-5'  # 國際標準時間 09:30 UTC = 香港時間 17:30 (星期一至五)
+  workflow_dispatch:        # 允許手動點擊按鈕執行
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4  # 全面支援 Node 24
+
+    - name: Set up Python
+      uses: actions/setup-python@v5  # 全面支援 Node 24
+      with:
+        python-version: '3.10'
+
+    - name: Install Dependencies
+      run: |
+        pip install pandas numpy plotly requests yfinance scikit-learn
+
+    - name: Run Stock AI Engine
+      run: python predict_stock.py
+
+    - name: Deploy index.html to Hugging Face Spaces
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        git config --global user.email "stockbot@github.com"
+        git config --global user.name "Stock AI Bot"
+        
+        # 複製並更新 Hugging Face Space (記得將下面的用戶名與 Space 名稱替換為你的實際名稱)
+        git clone https://oauth:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/【你的HF用戶名】/【你的Space名稱】 hf_space
+        
+        cp index.html hf_space/index.html
+        cd hf_space
+        git add index.html
+        git commit -m "Update Daily Stock AI Analysis: $(date)" || exit 0
+        git push origin main
