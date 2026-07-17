@@ -4,6 +4,7 @@ import yfinance as yf
 from sklearn.tree import DecisionTreeClassifier
 import plotly.graph_objects as go
 from datetime import datetime
+import requests
 
 # 追蹤的港股列表
 STOCKS = {
@@ -15,16 +16,29 @@ STOCKS = {
 
 results = []
 
-print("🚀 啟動港股實時量化推演引擎...")
+print("🚀 啟動【超強防禦版】港股實時量化推演引擎...")
+
+# 建立偽裝 Session，防止 Yahoo Finance 阻擋 GitHub Actions IP
+session = requests.Session()
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+})
 
 fig_all = go.Figure()
 
 for ticker, name in STOCKS.items():
     print(f"📊 正在獲取 {name} ({ticker}) 歷史數據...")
-    stock_data = yf.Ticker(ticker).history(period="2y")
     
-    if len(stock_data) < 250:
-        print(f"⚠️ {ticker} 數據不足，跳過。")
+    # 建立安全下載機制
+    try:
+        # 傳入偽裝 session
+        stock_data = yf.Ticker(ticker, session=session).history(period="2y")
+    except Exception as e:
+        print(f"❌ {ticker} 下載失敗 (網路異常): {e}，跳過此股。")
+        continue
+        
+    if stock_data.empty or len(stock_data) < 250:
+        print(f"⚠️ {ticker} 數據不足或被 Yahoo 限流，跳過此股。")
         continue
         
     df = stock_data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
@@ -52,18 +66,28 @@ for ticker, name in STOCKS.items():
     
     df.dropna(inplace=True)
     
+    if len(df) < 50:
+        print(f"⚠️ {ticker} 清洗數據後樣本太少，跳過。")
+        continue
+    
     # ---------------------------------------------------------
     # 2. AI 決策樹訓練
     # ---------------------------------------------------------
     features = ['RSI', 'Volatility', 'MA_Dev']
-    df['Future_5d_Return'] = df['Close'].shift(-5).pct_change(5)
+    # 修正未來 5 天回報計算順序
+    df['Future_5d_Return'] = df['Close'].pct_change(5).shift(-5)
     
     df['Label'] = 0
     df.loc[df['Future_5d_Return'] > 0.02, 'Label'] = 1
     df.loc[df['Future_5d_Return'] < -0.02, 'Label'] = -1
     
-    train_df = df.iloc[:-5].copy()
+    # 安全排除包含未來 NaNs 的訓練集
+    train_df = df.dropna(subset=['Future_5d_Return']).copy()
     
+    if len(train_df) < 30:
+        print(f"⚠️ {ticker} 可訓練樣本太少，跳過。")
+        continue
+        
     ai_model = DecisionTreeClassifier(max_depth=3, random_state=42)
     ai_model.fit(train_df[features], train_df['Label'])
     
@@ -113,16 +137,26 @@ for ticker, name in STOCKS.items():
     })
 
     # ---------------------------------------------------------
-    # 4. 提取最近3個月的數據畫圖 (核心修正：抹除時區資訊防止 Plotly 繪圖空白)
+    # 4. 🚀 降維打擊優化：直接從 2 年數據切出最近 3 個月畫圖 (免除二次網路請求)
     # ---------------------------------------------------------
-    hist_3m = yf.Ticker(ticker).history(period="3m")
-    # 修正重點：使用 strftime 抹除時區
+    three_months_ago = stock_data.index.max() - pd.Timedelta(days=90)
+    hist_3m = stock_data[stock_data.index >= three_months_ago]
+    
+    # 使用 strftime 抹除時區資訊，徹底解決 Plotly 空白線圖問題
     formatted_dates = hist_3m.index.strftime('%Y-%m-%d')
+    
     fig_all.add_trace(go.Scatter(
         x=formatted_dates, 
         y=hist_3m['Close'], 
         name=f"{name} ({ticker})"
     ))
+
+# ---------------------------------------------------------
+# 5. 防禦性收尾：如果所有股票都獲取失敗，避免生成空網頁
+# ---------------------------------------------------------
+if not results:
+    print("❌ 致命錯誤：所有股票數據獲取失敗！請檢查 Yahoo API 狀態。")
+    exit(1)
 
 df_report = pd.DataFrame(results)
 
@@ -142,7 +176,7 @@ chart_html = fig_all.to_html(full_html=False, include_plotlyjs='cdn')
 table_html = df_report.to_html(index=False, border=0, escape=False)
 
 # ---------------------------------------------------------
-# 5. 生成精美的前端 HTML 網頁
+# 6. 生成網頁
 # ---------------------------------------------------------
 html_content = f"""
 <!DOCTYPE html>
