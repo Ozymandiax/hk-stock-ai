@@ -1,12 +1,11 @@
 import numpy as np
 import pandas as pd
-import yfinance as yf
+import requests
 from sklearn.tree import DecisionTreeClassifier
 import plotly.graph_objects as go
 from datetime import datetime
-import requests
 
-# 追蹤的港股列表
+# 追蹤的港股列表 (可自由增減)
 STOCKS = {
     "2800.HK": "盈富基金 (Tracker Fund)",
     "0700.HK": "騰訊控股 (Tencent)",
@@ -16,29 +15,79 @@ STOCKS = {
 
 results = []
 
-print("🚀 啟動【超強防禦版】港股實時量化推演引擎...")
+print("🚀 啟動【免 yfinance・底層 API 直連版】港股實時量化推演引擎...")
 
-# 建立偽裝 Session，防止 Yahoo Finance 阻擋 GitHub Actions IP
-session = requests.Session()
-session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-})
+def fetch_stock_data_raw(ticker):
+    """
+    直接調用 Yahoo Finance v8 底層官方 Chart API (繞過 yfinance 的 Cookie/Crumb 阻擋)
+    """
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=2y&interval=1d"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
+    
+    response = requests.get(url, headers=headers, timeout=15)
+    if response.status_code != 200:
+        raise Exception(f"Yahoo API 響應錯誤，HTTP Code: {response.status_code}")
+    
+    data = response.json()
+    if 'chart' not in data or 'result' not in data['chart'] or data['chart']['result'] is None:
+        raise Exception("Yahoo 返回了無效的 JSON 數據格式")
+        
+    result = data['chart']['result'][0]
+    timestamps = result.get('timestamp') or []
+    if not timestamps:
+        raise Exception("未獲取到任何時間戳數據")
+        
+    indicators = result.get('indicators', {}).get('quote', [{}])[0]
+    
+    # 獲取各價格列表，若為 None 則回傳空列表，防止 None 導致 map 失敗
+    open_prices = indicators.get('open') or []
+    high_prices = indicators.get('high') or []
+    low_prices = indicators.get('low') or []
+    close_prices = indicators.get('close') or []
+    volume_list = indicators.get('volume') or []
+    
+    # 安全校驗長度是否一致
+    if not (len(timestamps) == len(open_prices) == len(high_prices) == len(low_prices) == len(close_prices) == len(volume_list)):
+        raise Exception("Yahoo 數據長度不一致 (Data mismatch)")
+        
+    # 建立 DataFrame
+    df = pd.DataFrame({
+        'Open': open_prices,
+        'High': high_prices,
+        'Low': low_prices,
+        'Close': close_prices,
+        'Volume': volume_list
+    }, index=pd.to_datetime(timestamps, unit='s'))
+    
+    # 填充缺失值 (停牌或假期造成的 None 值)
+    df['Close'] = df['Close'].ffill().bfill()
+    df['Open'] = df['Open'].fillna(df['Close'])
+    df['High'] = df['High'].fillna(df['Close'])
+    df['Low'] = df['Low'].fillna(df['Close'])
+    df['Volume'] = df['Volume'].fillna(0)
+    
+    # 轉換成香港時區
+    df.index = df.index.tz_localize('UTC').tz_convert('Asia/Hong_Kong')
+    return df
 
 fig_all = go.Figure()
 
 for ticker, name in STOCKS.items():
-    print(f"📊 正在獲取 {name} ({ticker}) 歷史數據...")
+    print(f"📊 正在下載並解析 {name} ({ticker})...")
     
-    # 建立安全下載機制
+    # 安全沙盒下載機制
     try:
-        # 傳入偽裝 session
-        stock_data = yf.Ticker(ticker, session=session).history(period="2y")
+        stock_data = fetch_stock_data_raw(ticker)
     except Exception as e:
-        print(f"❌ {ticker} 下載失敗 (網路異常): {e}，跳過此股。")
+        print(f"❌ {ticker} 獲取失敗: {e}，自動跳過此股。")
         continue
         
     if stock_data.empty or len(stock_data) < 250:
-        print(f"⚠️ {ticker} 數據不足或被 Yahoo 限流，跳過此股。")
+        print(f"⚠️ {ticker} 數據不足，跳過。")
         continue
         
     df = stock_data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
@@ -71,17 +120,16 @@ for ticker, name in STOCKS.items():
         continue
     
     # ---------------------------------------------------------
-    # 2. AI 決策樹訓練
+    # 2. AI 決策樹訓練 (精準預報未來5天動能)
     # ---------------------------------------------------------
     features = ['RSI', 'Volatility', 'MA_Dev']
-    # 修正未來 5 天回報計算順序
     df['Future_5d_Return'] = df['Close'].pct_change(5).shift(-5)
     
     df['Label'] = 0
     df.loc[df['Future_5d_Return'] > 0.02, 'Label'] = 1
     df.loc[df['Future_5d_Return'] < -0.02, 'Label'] = -1
     
-    # 安全排除包含未來 NaNs 的訓練集
+    # 排除包含 NaNs 的訓練集
     train_df = df.dropna(subset=['Future_5d_Return']).copy()
     
     if len(train_df) < 30:
@@ -92,7 +140,7 @@ for ticker, name in STOCKS.items():
     ai_model.fit(train_df[features], train_df['Label'])
     
     # ---------------------------------------------------------
-    # 3. 實時推演今天最新的狀態
+    # 3. 實時推演今日最新狀態
     # ---------------------------------------------------------
     latest_row = df.iloc[-1]
     current_price = round(latest_row['Close'], 2)
@@ -100,8 +148,8 @@ for ticker, name in STOCKS.items():
     best_buy_min = round(min(latest_row['BB_Lower'], latest_row['MA250']), 2)
     best_buy_max = round(latest_row['BB_Lower'], 2)
     
-    # AI 買入信心度預測
-    latest_features = np.array([[latest_row['RSI'], latest_row['Volatility'], latest_row['MA_Dev']]])
+    # 用 DataFrame 包裹特徵，消除 scikit-learn 的 Feature Names 警告
+    latest_features = pd.DataFrame([[latest_row['RSI'], latest_row['Volatility'], latest_row['MA_Dev']]], columns=features)
     ai_pred_proba = ai_model.predict_proba(latest_features)[0]
     
     classes = ai_model.classes_
@@ -137,12 +185,11 @@ for ticker, name in STOCKS.items():
     })
 
     # ---------------------------------------------------------
-    # 4. 🚀 降維打擊優化：直接從 2 年數據切出最近 3 個月畫圖 (免除二次網路請求)
+    # 4. 🚀 記憶體切片優化：直接切出 3 個月畫圖 (免除二次網路請求，100% 解決空白線圖)
     # ---------------------------------------------------------
     three_months_ago = stock_data.index.max() - pd.Timedelta(days=90)
     hist_3m = stock_data[stock_data.index >= three_months_ago]
     
-    # 使用 strftime 抹除時區資訊，徹底解決 Plotly 空白線圖問題
     formatted_dates = hist_3m.index.strftime('%Y-%m-%d')
     
     fig_all.add_trace(go.Scatter(
@@ -152,7 +199,7 @@ for ticker, name in STOCKS.items():
     ))
 
 # ---------------------------------------------------------
-# 5. 防禦性收尾：如果所有股票都獲取失敗，避免生成空網頁
+# 5. 安全防範
 # ---------------------------------------------------------
 if not results:
     print("❌ 致命錯誤：所有股票數據獲取失敗！請檢查 Yahoo API 狀態。")
@@ -176,7 +223,7 @@ chart_html = fig_all.to_html(full_html=False, include_plotlyjs='cdn')
 table_html = df_report.to_html(index=False, border=0, escape=False)
 
 # ---------------------------------------------------------
-# 6. 生成網頁
+# 6. 生成網頁 index.html
 # ---------------------------------------------------------
 html_content = f"""
 <!DOCTYPE html>
@@ -228,4 +275,4 @@ html_content = f"""
 with open("index.html", "w", encoding="utf-8") as f:
     f.write(html_content)
 
-print("🎉 恭喜！港股 AI 推演網頁 index.html 生成完畢！")
+print("🎉 恭喜！原生 API 超穩版 index.html 生成完畢！")
