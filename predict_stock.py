@@ -5,7 +5,7 @@ from sklearn.tree import DecisionTreeClassifier
 import plotly.graph_objects as go
 from datetime import datetime
 
-# 追蹤的港股列表 (可自由增減)
+# 追蹤的港股列表
 STOCKS = {
     "2800.HK": "盈富基金 (Tracker Fund)",
     "0700.HK": "騰訊控股 (Tencent)",
@@ -17,12 +17,10 @@ results = []
 
 print("🚀 啟動港股實時量化推演引擎...")
 
-# 建立 Plotly 多圖表對比
 fig_all = go.Figure()
 
 for ticker, name in STOCKS.items():
     print(f"📊 正在獲取 {name} ({ticker}) 歷史數據...")
-    # 使用 yf.Ticker 獲取 clean 數據，避免 MultiIndex 問題
     stock_data = yf.Ticker(ticker).history(period="2y")
     
     if len(stock_data) < 250:
@@ -35,12 +33,10 @@ for ticker, name in STOCKS.items():
     # 1. 技術指標計算 (物理防線)
     # ---------------------------------------------------------
     df['MA20'] = df['Close'].rolling(window=20).mean()
-    df['MA250'] = df['Close'].rolling(window=250).mean() # 年線 (牛熊分界線)
-    
-    # 計算布林通道 (Bollinger Bands) -> 用來鎖定「最佳物理買入價」
+    df['MA250'] = df['Close'].rolling(window=250).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
-    df['BB_Lower'] = df['MA20'] - 2 * df['STD20'] # 下軌 (強支撐位)
-    df['BB_Upper'] = df['MA20'] + 2 * df['STD20'] # 上軌 (強阻力位)
+    df['BB_Lower'] = df['MA20'] - 2 * df['STD20']
+    df['BB_Upper'] = df['MA20'] + 2 * df['STD20']
     
     # 計算 RSI
     delta = df['Close'].diff()
@@ -49,7 +45,7 @@ for ticker, name in STOCKS.items():
     rs = gain / (loss + 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # 波動率
+    # 波動率與偏離度
     df['Return'] = df['Close'].pct_change()
     df['Volatility'] = df['Return'].rolling(window=10).std() * 100
     df['MA_Dev'] = (df['Close'] - df['MA20']) / df['MA20'] * 100
@@ -57,17 +53,16 @@ for ticker, name in STOCKS.items():
     df.dropna(inplace=True)
     
     # ---------------------------------------------------------
-    # 2. AI 決策樹訓練 (預測未來 5 天上漲機率)
+    # 2. AI 決策樹訓練
     # ---------------------------------------------------------
     features = ['RSI', 'Volatility', 'MA_Dev']
     df['Future_5d_Return'] = df['Close'].shift(-5).pct_change(5)
     
-    # 標籤：未來 5 天升幅 > 2% 記為 1 (買入)，跌幅 > 2% 記為 -1 (賣出)，其餘為 0
     df['Label'] = 0
     df.loc[df['Future_5d_Return'] > 0.02, 'Label'] = 1
     df.loc[df['Future_5d_Return'] < -0.02, 'Label'] = -1
     
-    train_df = df.iloc[:-5].copy() # 避開最後 5 天
+    train_df = df.iloc[:-5].copy()
     
     ai_model = DecisionTreeClassifier(max_depth=3, random_state=42)
     ai_model.fit(train_df[features], train_df['Label'])
@@ -78,16 +73,13 @@ for ticker, name in STOCKS.items():
     latest_row = df.iloc[-1]
     current_price = round(latest_row['Close'], 2)
     
-    # 計算「最佳買入價區間」：
-    # 結合布林下軌(BB_Lower) 與 MA250(年線) 作為雙重物理支撐位
     best_buy_min = round(min(latest_row['BB_Lower'], latest_row['MA250']), 2)
     best_buy_max = round(latest_row['BB_Lower'], 2)
     
-    # AI 機率預測 (評估買入時機)
+    # AI 買入信心度預測
     latest_features = np.array([[latest_row['RSI'], latest_row['Volatility'], latest_row['MA_Dev']]])
     ai_pred_proba = ai_model.predict_proba(latest_features)[0]
     
-    # class_labels 對應 [-1, 0, 1]。 index 2 是 1 (買入機率)
     classes = ai_model.classes_
     buy_idx = np.where(classes == 1)[0]
     buy_probability = round(ai_pred_proba[buy_idx[0]] * 100, 1) if len(buy_idx) > 0 else 0.0
@@ -120,16 +112,21 @@ for ticker, name in STOCKS.items():
         "14天RSI": round(latest_row['RSI'], 1)
     })
 
+    # ---------------------------------------------------------
+    # 4. 提取最近3個月的數據畫圖 (核心修正：抹除時區資訊防止 Plotly 繪圖空白)
+    # ---------------------------------------------------------
+    hist_3m = yf.Ticker(ticker).history(period="3m")
+    # 修正重點：使用 strftime 抹除時區
+    formatted_dates = hist_3m.index.strftime('%Y-%m-%d')
+    fig_all.add_trace(go.Scatter(
+        x=formatted_dates, 
+        y=hist_3m['Close'], 
+        name=f"{name} ({ticker})"
+    ))
+
 df_report = pd.DataFrame(results)
 
-# ---------------------------------------------------------
-# 4. 繪製 Plotly 多股趨勢對比圖
-# ---------------------------------------------------------
-print("⚡ 正在生成互動式分析圖表...")
-for ticker, name in STOCKS.items():
-    hist = yf.Ticker(ticker).history(period="3m")
-    fig_all.add_trace(go.Scatter(x=hist.index.astype(str), y=hist['Close'], name=f"{name} 股價"))
-
+# 調整圖表美化外觀
 fig_all.update_layout(
     title="📈 近三個月核心港股走勢對比 (實時Yahoo數據)",
     xaxis_title="日期",
@@ -137,7 +134,8 @@ fig_all.update_layout(
     hovermode="x unified",
     template="plotly_dark",
     paper_bgcolor="#121212",
-    plot_bgcolor="#1e1e1e"
+    plot_bgcolor="#161c24",
+    margin=dict(l=40, r=40, t=60, b=40)
 )
 
 chart_html = fig_all.to_html(full_html=False, include_plotlyjs='cdn')
