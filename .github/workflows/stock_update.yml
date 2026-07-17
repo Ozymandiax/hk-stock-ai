@@ -20,7 +20,7 @@ jobs:
 
     - name: Install Dependencies
       run: |
-        pip install pandas numpy plotly requests yfinance scikit-learn
+        pip install pandas numpy plotly requests scikit-learn
 
     - name: Run Stock AI Engine
       run: python predict_stock.py
